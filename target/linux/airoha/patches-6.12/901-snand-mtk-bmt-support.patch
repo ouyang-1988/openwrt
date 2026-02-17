@@ -1,13 +1,10 @@
 --- a/drivers/mtd/nand/spi/core.c
 +++ b/drivers/mtd/nand/spi/core.c
-@@ -19,6 +19,7 @@
+@@ -19,3 +19,4 @@
  #include <linux/string.h>
  #include <linux/spi/spi.h>
  #include <linux/spi/spi-mem.h>
 +#include <linux/mtd/mtk_bmt.h>
- 
- static int spinand_read_reg_op(struct spinand_device *spinand, u8 reg, u8 *val)
- {
 @@ -1596,6 +1597,7 @@ static int spinand_probe(struct spi_mem
  	if (ret)
  		return ret;
