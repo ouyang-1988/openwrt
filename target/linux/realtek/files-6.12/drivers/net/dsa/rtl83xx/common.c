@@ -287,7 +287,6 @@ static int rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 	led_node = of_find_compatible_node(NULL, NULL, "realtek,rtl9300-leds");
 
 	for_each_node_by_name(dn, "port") {
-		phy_interface_t interface;
 		u32 led_set;
 		char led_set_str[16] = {0};
 
@@ -305,23 +304,14 @@ static int rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 		}
 
 		if (pcs_node) {
-			priv->pcs[pn] = rtpcs_create(priv->dev, pcs_node, pn);
-			if (IS_ERR(priv->pcs[pn])) {
+			priv->ports[pn].pcs = rtpcs_create(priv->dev, pcs_node, pn);
+			if (IS_ERR(priv->ports[pn].pcs)) {
 				dev_err(priv->dev, "port %u failed to create PCS instance: %ld\n",
-					pn, PTR_ERR(priv->pcs[pn]));
-				priv->pcs[pn] = NULL;
+					pn, PTR_ERR(priv->ports[pn].pcs));
+				priv->ports[pn].pcs = NULL;
 				continue;
 			}
 		}
-
-		if (of_get_phy_mode(dn, &interface))
-			interface = PHY_INTERFACE_MODE_NA;
-		if (interface == PHY_INTERFACE_MODE_10G_QXGMII)
-			priv->ports[pn].is2G5 = true;
-		if (interface == PHY_INTERFACE_MODE_USXGMII)
-			priv->ports[pn].is2G5 = priv->ports[pn].is10G = true;
-		if (interface == PHY_INTERFACE_MODE_10GBASER)
-			priv->ports[pn].is10G = true;
 
 		priv->ports[pn].leds_on_this_port = 0;
 		if (led_node) {
@@ -338,7 +328,7 @@ static int rtl83xx_mdio_probe(struct rtl838x_switch_priv *priv)
 		}
 
 		if (!phy_node) {
-			if (priv->pcs[pn])
+			if (priv->ports[pn].pcs)
 				priv->ports[pn].phy_is_integrated = true;
 
 			continue;
@@ -473,7 +463,7 @@ int rtl83xx_lag_del(struct dsa_switch *ds, int group, int port)
 // 	mutex_lock(&priv->reg_mutex);
 
 // 	idx = find_first_zero_bit(priv->octet_cntr_use_bm, MAX_COUNTERS);
-// 	if (idx >= priv->n_counters) {
+// 	if (idx >= priv->r->n_counters) {
 // 		mutex_unlock(&priv->reg_mutex);
 // 		return -1;
 // 	}
@@ -499,9 +489,9 @@ int rtl83xx_packet_cntr_alloc(struct rtl838x_switch_priv *priv)
 	 * a 0-bit means the counter is already allocated (for octets)
 	 */
 	idx = find_first_bit(priv->packet_cntr_use_bm, MAX_COUNTERS * 2);
-	if (idx >= priv->n_counters * 2) {
+	if (idx >= priv->r->n_counters * 2) {
 		j = find_first_zero_bit(priv->octet_cntr_use_bm, MAX_COUNTERS);
-		if (j >= priv->n_counters) {
+		if (j >= priv->r->n_counters) {
 			mutex_unlock(&priv->reg_mutex);
 			return -1;
 		}
@@ -1332,7 +1322,7 @@ static int rtldsa_ethernet_loaded(struct platform_device *pdev)
 	struct device_node *ports, *port;
 	int ret = -EPROBE_DEFER;
 
-	ports = of_get_child_by_name(dn, "ports");
+	ports = of_get_child_by_name(dn, "ethernet-ports");
 	if (!ports)
 		return -ENODEV;
 
@@ -1411,60 +1401,46 @@ static int rtl83xx_sw_probe(struct platform_device *pdev)
 		priv->cpu_port = RTL838X_CPU_PORT;
 		priv->port_mask = 0x1f;
 		priv->port_width = 1;
-		priv->irq_mask = 0x0FFFFFFF;
-		priv->ds->num_ports = RTL838X_CPU_PORT + 1;
 		priv->fib_entries = 8192;
 		priv->ds->num_lag_ids = 8;
 		priv->l2_bucket_size = 4;
 		priv->n_mst = 64;
-		priv->n_pie_blocks = 12;
-		priv->n_counters = 128;
 		break;
 	case RTL8390_FAMILY_ID:
 		priv->ds->ops = &rtldsa_83xx_switch_ops;
 		priv->cpu_port = RTL839X_CPU_PORT;
 		priv->port_mask = 0x3f;
 		priv->port_width = 2;
-		priv->irq_mask = 0xFFFFFFFFFFFFFULL;
-		priv->ds->num_ports = RTL839X_CPU_PORT + 1;
 		priv->fib_entries = 16384;
 		priv->ds->num_lag_ids = 16;
 		priv->l2_bucket_size = 4;
 		priv->n_mst = 256;
-		priv->n_pie_blocks = 18;
-		priv->n_counters = 1024;
 		break;
 	case RTL9300_FAMILY_ID:
 		priv->ds->ops = &rtldsa_93xx_switch_ops;
 		priv->cpu_port = RTL930X_CPU_PORT;
 		priv->port_mask = 0x1f;
 		priv->port_width = 1;
-		priv->irq_mask = 0x0FFFFFFF;
-		priv->ds->num_ports = RTL930X_CPU_PORT + 1;
 		priv->fib_entries = 16384;
 		priv->ds->num_lag_ids = 16;
 		sw_w32(0, RTL930X_ST_CTRL);
 		priv->l2_bucket_size = 8;
 		priv->n_mst = 64;
-		priv->n_pie_blocks = 16;
-		priv->n_counters = 2048;
 		break;
 	case RTL9310_FAMILY_ID:
 		priv->ds->ops = &rtldsa_93xx_switch_ops;
 		priv->cpu_port = RTL931X_CPU_PORT;
 		priv->port_mask = 0x3f;
 		priv->port_width = 2;
-		priv->irq_mask = GENMASK_ULL(priv->cpu_port - 1, 0);
-		priv->ds->num_ports = RTL931X_CPU_PORT + 1;
 		priv->fib_entries = 16384;
 		priv->ds->num_lag_ids = 16;
 		sw_w32(0, RTL931x_ST_CTRL);
 		priv->l2_bucket_size = 8;
 		priv->n_mst = 128;
-		priv->n_pie_blocks = 16;
-		priv->n_counters = 2048;
 		break;
 	}
+	priv->ds->num_ports = priv->cpu_port + 1;
+	priv->irq_mask = GENMASK_ULL(priv->cpu_port - 1, 0);
 
 	err = rtl83xx_mdio_probe(priv);
 	if (err) {
