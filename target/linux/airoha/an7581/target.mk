@@ -7,6 +7,7 @@ FEATURES+=pwm source-only
 
 DEFAULT_PACKAGES += \
 	airoha-en7581-npu-firmware \
+	uboot-envtools \
 	kmod-airoha-eth \
 	kmod-airoha-npu
 

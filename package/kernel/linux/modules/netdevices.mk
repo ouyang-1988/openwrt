@@ -740,6 +740,64 @@ endef
 
 $(eval $(call KernelPackage,dsa-b53-mdio))
 
+
+define KernelPackage/dsa-ksz9477
+  SUBMENU:=$(NETWORK_DEVICES_MENU)
+  TITLE:=Microchip KSZ9477 family managed switch DSA support
+  DEPENDS:=@TARGET_imx_cortexa53 +kmod-dsa +kmod-dsa-notag +kmod-phy-micrel +kmod-regmap-core
+  KCONFIG:= \
+	CONFIG_NET_DSA_MICROCHIP_KSZ_COMMON \
+	CONFIG_NET_DSA_MICROCHIP_KSZ9477_I2C=n \
+	CONFIG_NET_DSA_MICROCHIP_KSZ_SPI=n \
+	CONFIG_NET_DSA_MICROCHIP_KSZ_PTP=n \
+	CONFIG_NET_DSA_MICROCHIP_KSZ8863_SMI=n \
+	CONFIG_NET_DSA_TAG_KSZ=y
+  FILES:= \
+	$(LINUX_DIR)/drivers/net/dsa/microchip/ksz_switch.ko \
+	$(LINUX_DIR)/net/dsa/tag_ksz.ko
+  AUTOLOAD:=$(call AutoProbe,ksz_switch)
+endef
+
+define KernelPackage/dsa-ksz9477/description
+  Microchip KSZ9477 family managed switch support. Note that this should be target
+  specific as the driver enables DCB which grows the static kernel code.
+endef
+
+$(eval $(call KernelPackage,dsa-ksz9477))
+
+
+define KernelPackage/dsa-ksz9477-i2c
+  SUBMENU:=$(NETWORK_DEVICES_MENU)
+  TITLE:=Microchip KSZ9477 family managed switch DSA support via I2C
+  DEPENDS:=+kmod-dsa-ksz9477 +kmod-regmap-i2c
+  KCONFIG:=CONFIG_NET_DSA_MICROCHIP_KSZ9477_I2C
+  FILES:= $(LINUX_DIR)/drivers/net/dsa/microchip/ksz9477_i2c.ko
+  AUTOLOAD:=$(call AutoProbe,ksz9477_i2c)
+endef
+
+define KernelPackage/dsa-ksz9477-i2c/description
+  Microchip KSZ9477 family managed switch support via I2C
+endef
+
+$(eval $(call KernelPackage,dsa-ksz9477-i2c))
+
+
+define KernelPackage/dsa-ksz9477-spi
+  SUBMENU:=$(NETWORK_DEVICES_MENU)
+  TITLE:=Microchip KSZ9477 family managed switch DSA support via SPI
+  DEPENDS:=+kmod-dsa-ksz9477 +kmod-regmap-spi
+  KCONFIG:=CONFIG_NET_DSA_MICROCHIP_KSZ_SPI
+  FILES:= $(LINUX_DIR)/drivers/net/dsa/microchip/ksz_spi.ko
+  AUTOLOAD:=$(call AutoProbe,ksz_spi)
+endef
+
+define KernelPackage/dsa-ksz9477-spi/description
+  Microchip KSZ9477 family managed switch support via SPI
+endef
+
+$(eval $(call KernelPackage,dsa-ksz9477-spi))
+
+
 define KernelPackage/dsa-mv88e6060
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=Marvell MV88E6060 DSA Switch
@@ -780,6 +838,23 @@ define KernelPackage/dsa-mv88e6xxx/description
 endef
 
 $(eval $(call KernelPackage,dsa-mv88e6xxx))
+
+define KernelPackage/dsa-mxl862xx
+  SUBMENU:=Network Devices
+  TITLE:=MaxLinear MXL862 switch support
+  KCONFIG:= \
+    CONFIG_NET_DSA_TAG_MXL_862XX \
+    CONFIG_NET_DSA_TAG_MXL_862XX_8021Q \
+    CONFIG_NET_DSA_MXL862
+  DEPENDS:=+kmod-dsa +kmod-lib-crc16 +kmod-phy-maxlinear
+  FILES:= \
+    $(LINUX_DIR)/drivers/net/dsa/mxl862xx/mxl862xx_dsa.ko \
+    $(LINUX_DIR)/net/dsa/tag_mxl862xx.ko \
+    $(LINUX_DIR)/net/dsa/tag_mxl862xx_8021q.ko
+  AUTOLOAD:=$(call AutoProbe,mxl862xx_dsa)
+endef
+
+$(eval $(call KernelPackage,dsa-mxl862xx))
 
 define KernelPackage/dsa-qca8k
   SUBMENU:=$(NETWORK_DEVICES_MENU)

@@ -150,7 +150,6 @@ struct rteth_ctrl {
 	struct rtl838x_rx_q rx_qs[RTETH_RX_RINGS];
 	struct phylink *phylink;
 	struct phylink_config phylink_config;
-	struct phylink_pcs pcs;
 	const struct rteth_config *r;
 	u32 lastEvent;
 	/* receive handling */
@@ -461,11 +460,16 @@ static void rteth_93xx_hw_reset(struct rteth_ctrl *ctrl)
 	rteth_nic_reset(ctrl, 0x6);
 
 	/* Setup Head of Line */
-	for (int i = 0; i < RTETH_RX_RINGS; i++) {
-		int pos = (i % 3) * 10;
+	for (int r = 0; r < RTETH_RX_RINGS; r++) {
+		int cnt = min(RTETH_RX_RING_SIZE, 0x3ff);
+		int pos = (r % 3) * 10;
+		u32 v;
 
-		sw_w32_mask(0x3ff << pos, 0, ctrl->r->dma_if_rx_ring_size(i));
-		sw_w32_mask(0x3ff << pos, RTETH_RX_RING_SIZE, ctrl->r->dma_if_rx_ring_cntr(i));
+		/* set ring size */
+		sw_w32_mask(0x3ff << pos, cnt << pos, ctrl->r->dma_if_rx_ring_size(r));
+		/* clear counters */
+		v = (sw_r32(ctrl->r->dma_if_rx_ring_cntr(r)) >> pos) & 0x3ff;
+		sw_w32_mask(0x3ff << pos, v, ctrl->r->dma_if_rx_ring_cntr(r));
 	}
 }
 
@@ -526,7 +530,7 @@ static void rteth_hw_ring_setup(struct rteth_ctrl *ctrl)
 		       ctrl->r->dma_tx_base + r * 4);
 }
 
-static void rtl838x_hw_en_rxtx(struct rteth_ctrl *ctrl)
+static void rteth_838x_hw_en_rxtx(struct rteth_ctrl *ctrl)
 {
 	/* Truncate RX buffer to DEFAULT_MTU bytes, pad TX */
 	sw_w32((DEFAULT_MTU << 16) | RX_TRUNCATE_EN_83XX | TX_PAD_EN_838X, ctrl->r->dma_if_ctrl);
@@ -549,7 +553,7 @@ static void rtl838x_hw_en_rxtx(struct rteth_ctrl *ctrl)
 	sw_w32_mask(0, BIT(3), ctrl->r->mac_l2_port_ctrl);
 }
 
-static void rtl839x_hw_en_rxtx(struct rteth_ctrl *ctrl)
+static void rteth_839x_hw_en_rxtx(struct rteth_ctrl *ctrl)
 {
 	/* Setup CPU-Port: RX Buffer */
 	sw_w32((DEFAULT_MTU << 5) | RX_TRUNCATE_EN_83XX, ctrl->r->dma_if_ctrl);
@@ -572,22 +576,10 @@ static void rtl839x_hw_en_rxtx(struct rteth_ctrl *ctrl)
 	sw_w32_mask(0, 3, ctrl->r->mac_force_mode_ctrl);
 }
 
-static void rtl93xx_hw_en_rxtx(struct rteth_ctrl *ctrl)
+static void rteth_930x_hw_en_rxtx(struct rteth_ctrl *ctrl)
 {
 	/* Setup CPU-Port: RX Buffer truncated at DEFAULT_MTU Bytes */
 	sw_w32((DEFAULT_MTU << 16) | RX_TRUNCATE_EN_93XX, ctrl->r->dma_if_ctrl);
-
-	for (int i = 0; i < RTETH_RX_RINGS; i++) {
-		int cnt = min(RTETH_RX_RING_SIZE - 2, 0x3ff);
-		int pos = (i % 3) * 10;
-		u32 v;
-
-		sw_w32_mask(0x3ff << pos, cnt << pos, ctrl->r->dma_if_rx_ring_size(i));
-
-		/* Some SoCs have issues with missing underflow protection */
-		v = (sw_r32(ctrl->r->dma_if_rx_ring_cntr(i)) >> pos) & 0x3ff;
-		sw_w32_mask(0x3ff << pos, v, ctrl->r->dma_if_rx_ring_cntr(i));
-	}
 
 	rteth_enable_all_rx_irqs(ctrl);
 
@@ -597,15 +589,25 @@ static void rtl93xx_hw_en_rxtx(struct rteth_ctrl *ctrl)
 	/* Restart TX/RX to CPU port, enable CRC checking */
 	sw_w32_mask(0x0, 0x3 | BIT(4), ctrl->r->mac_l2_port_ctrl);
 
-	if (ctrl->r->family_id == RTL9300_FAMILY_ID)
-		sw_w32_mask(0, BIT(ctrl->r->cpu_port), RTL930X_L2_UNKN_UC_FLD_PMSK);
-	else
-		sw_w32_mask(0, BIT(ctrl->r->cpu_port), RTL931X_L2_UNKN_UC_FLD_PMSK);
+	sw_w32_mask(0, BIT(ctrl->r->cpu_port), RTL930X_L2_UNKN_UC_FLD_PMSK);
+	sw_w32(0x217, ctrl->r->mac_force_mode_ctrl);
+}
 
-	if (ctrl->r->family_id == RTL9300_FAMILY_ID)
-		sw_w32(0x217, ctrl->r->mac_force_mode_ctrl);
-	else
-		sw_w32(0x2a1d, ctrl->r->mac_force_mode_ctrl);
+static void rteth_931x_hw_en_rxtx(struct rteth_ctrl *ctrl)
+{
+	/* Setup CPU-Port: RX Buffer truncated at DEFAULT_MTU Bytes */
+	sw_w32((DEFAULT_MTU << 16) | RX_TRUNCATE_EN_93XX, ctrl->r->dma_if_ctrl);
+
+	rteth_enable_all_rx_irqs(ctrl);
+
+	/* Enable DMA */
+	sw_w32_mask(0, ctrl->r->tx_rx_enable, ctrl->r->dma_if_ctrl);
+
+	/* Restart TX/RX to CPU port, enable CRC checking */
+	sw_w32_mask(0x0, 0x3 | BIT(4), ctrl->r->mac_l2_port_ctrl);
+
+	sw_w32_mask(0, BIT(ctrl->r->cpu_port), RTL931X_L2_UNKN_UC_FLD_PMSK);
+	sw_w32(0x2a1d, ctrl->r->mac_force_mode_ctrl);
 }
 
 static void rteth_setup_ring_buffer(struct rteth_ctrl *ctrl)
@@ -645,7 +647,7 @@ static void rteth_setup_ring_buffer(struct rteth_ctrl *ctrl)
 	}
 }
 
-static void rtl839x_setup_notify_ring_buffer(struct rteth_ctrl *ctrl)
+static void rteth_839x_setup_notify_ring_buffer(struct rteth_ctrl *ctrl)
 {
 	struct notify_b *b = ctrl->membase;
 
@@ -662,6 +664,42 @@ static void rtl839x_setup_notify_ring_buffer(struct rteth_ctrl *ctrl)
 	/* Enable Notification */
 	sw_w32_mask(0, 1 << 0, RTL839X_L2_NOTIFICATION_CTRL);
 	ctrl->lastEvent = 0;
+
+	/* Make sure the ring structure is visible to the ASIC */
+	mb();
+	flush_cache_all();
+}
+
+static void rteth_838x_hw_init(struct rteth_ctrl *ctrl)
+{
+	/* Trap IGMP/MLD traffic to CPU-Port */
+	sw_w32(0x3, RTL838X_SPCL_TRAP_IGMP_CTRL);
+	/* Flush learned FDB entries on link down of a port */
+	sw_w32_mask(0, BIT(7), RTL838X_L2_CTRL_0);
+}
+
+static void rteth_839x_hw_init(struct rteth_ctrl *ctrl)
+{
+	/* Trap MLD and IGMP messages to CPU_PORT */
+	sw_w32(0x3, RTL839X_SPCL_TRAP_IGMP_CTRL);
+	/* Flush learned FDB entries on link down of a port */
+	sw_w32_mask(0, BIT(7), RTL839X_L2_CTRL_0);
+}
+
+static void rteth_930x_hw_init(struct rteth_ctrl *ctrl)
+{
+	/* Flush learned FDB entries on link down of a port */
+	sw_w32_mask(0, BIT(7), RTL930X_L2_CTRL);
+	/* Trap MLD and IGMP messages to CPU_PORT */
+	sw_w32((0x2 << 3) | 0x2, RTL930X_VLAN_APP_PKT_CTRL);
+}
+
+static void rteth_931x_hw_init(struct rteth_ctrl *ctrl)
+{
+	/* Trap MLD and IGMP messages to CPU_PORT */
+	sw_w32((0x2 << 3) | 0x2, RTL931X_VLAN_APP_PKT_CTRL);
+	/* Set PCIE_PWR_DOWN */
+	sw_w32_mask(0, BIT(1), RTL931X_PS_SOC_CTRL);
 }
 
 static int rteth_open(struct net_device *ndev)
@@ -676,12 +714,8 @@ static int rteth_open(struct net_device *ndev)
 	ctrl->r->hw_reset(ctrl);
 	rteth_setup_cpu_rx_rings(ctrl);
 	rteth_setup_ring_buffer(ctrl);
-	if (ctrl->r->family_id == RTL8390_FAMILY_ID) {
-		rtl839x_setup_notify_ring_buffer(ctrl);
-		/* Make sure the ring structure is visible to the ASIC */
-		mb();
-		flush_cache_all();
-	}
+	if (ctrl->r->setup_notify_ring_buffer)
+		ctrl->r->setup_notify_ring_buffer(ctrl);
 
 	rteth_hw_ring_setup(ctrl);
 	phylink_start(ctrl->phylink);
@@ -689,53 +723,63 @@ static int rteth_open(struct net_device *ndev)
 	for (int i = 0; i < RTETH_RX_RINGS; i++)
 		napi_enable(&ctrl->rx_qs[i].napi);
 
-	switch (ctrl->r->family_id) {
-	case RTL8380_FAMILY_ID:
-		rtl838x_hw_en_rxtx(ctrl);
-		/* Trap IGMP/MLD traffic to CPU-Port */
-		sw_w32(0x3, RTL838X_SPCL_TRAP_IGMP_CTRL);
-		/* Flush learned FDB entries on link down of a port */
-		sw_w32_mask(0, BIT(7), RTL838X_L2_CTRL_0);
-		break;
-
-	case RTL8390_FAMILY_ID:
-		rtl839x_hw_en_rxtx(ctrl);
-		/* Trap MLD and IGMP messages to CPU_PORT */
-		sw_w32(0x3, RTL839X_SPCL_TRAP_IGMP_CTRL);
-		/* Flush learned FDB entries on link down of a port */
-		sw_w32_mask(0, BIT(7), RTL839X_L2_CTRL_0);
-		break;
-
-	case RTL9300_FAMILY_ID:
-		rtl93xx_hw_en_rxtx(ctrl);
-		/* Flush learned FDB entries on link down of a port */
-		sw_w32_mask(0, BIT(7), RTL930X_L2_CTRL);
-		/* Trap MLD and IGMP messages to CPU_PORT */
-		sw_w32((0x2 << 3) | 0x2,  RTL930X_VLAN_APP_PKT_CTRL);
-		break;
-
-	case RTL9310_FAMILY_ID:
-		rtl93xx_hw_en_rxtx(ctrl);
-
-		/* Trap MLD and IGMP messages to CPU_PORT */
-		sw_w32((0x2 << 3) | 0x2,  RTL931X_VLAN_APP_PKT_CTRL);
-
-		/* Set PCIE_PWR_DOWN */
-		sw_w32_mask(0, BIT(1), RTL931X_PS_SOC_CTRL);
-		break;
-	}
-
+	ctrl->r->hw_init(ctrl);
+	ctrl->r->hw_en_rxtx(ctrl);
 	netif_tx_start_all_queues(ndev);
-
 	spin_unlock_irqrestore(&ctrl->lock, flags);
 
 	return 0;
 }
 
-static void rtl838x_hw_stop(struct rteth_ctrl *ctrl)
+static void rteth_838x_hw_stop(struct rteth_ctrl *ctrl)
 {
-	u32 force_mac = ctrl->r->family_id == RTL8380_FAMILY_ID ? 0x6192C : 0x75;
+	/* Block all ports */
+	sw_w32(0x03000000, RTL838X_TBL_ACCESS_DATA_0(0));
+	sw_w32(0x00000000, RTL838X_TBL_ACCESS_DATA_0(1));
+	sw_w32(1 << 15 | 2 << 12, RTL838X_TBL_ACCESS_CTRL_0);
 
+	/* Disable FAST_AGE_OUT otherwise flush will hang */
+	sw_w32_mask(BIT(23), 0, RTL838X_L2_CTRL_1);
+
+	/* Flush L2 address cache */
+	for (int i = 0; i <= ctrl->r->cpu_port; i++) {
+		sw_w32(BIT(26) | BIT(23) | i << 5, ctrl->r->l2_tbl_flush_ctrl);
+		do { } while (sw_r32(ctrl->r->l2_tbl_flush_ctrl) & BIT(26));
+	}
+
+	/* CPU-Port: Link down */
+	sw_w32(0x6192C, ctrl->r->mac_force_mode_ctrl);
+}
+
+static void rteth_839x_hw_stop(struct rteth_ctrl *ctrl)
+{
+	/* Flush L2 address cache */
+	for (int i = 0; i <= ctrl->r->cpu_port; i++) {
+		sw_w32(BIT(28) | BIT(25) | i << 5, ctrl->r->l2_tbl_flush_ctrl);
+		do { } while (sw_r32(ctrl->r->l2_tbl_flush_ctrl) & BIT(28));
+	}
+
+	sw_w32(0x75, ctrl->r->mac_force_mode_ctrl);
+}
+
+static void rteth_930x_hw_stop(struct rteth_ctrl *ctrl)
+{
+	/* TODO: L2 flush needed */
+
+	/* CPU-Port: Link down */
+	sw_w32_mask(0x3, 0, ctrl->r->mac_force_mode_ctrl);
+}
+
+static void rteth_931x_hw_stop(struct rteth_ctrl *ctrl)
+{
+	/* TODO: L2 flush needed */
+
+	/* CPU-Port: Link down */
+	sw_w32_mask(BIT(0) | BIT(9), 0, ctrl->r->mac_force_mode_ctrl);
+}
+
+static void rteth_hw_stop(struct rteth_ctrl *ctrl)
+{
 	/* Disable RX/TX from/to CPU-port */
 	sw_w32_mask(0x3, 0, ctrl->r->mac_l2_port_ctrl);
 
@@ -743,36 +787,8 @@ static void rtl838x_hw_stop(struct rteth_ctrl *ctrl)
 	sw_w32_mask(ctrl->r->tx_rx_enable, 0, ctrl->r->dma_if_ctrl);
 	mdelay(200); /* Test, whether this is needed */
 
-	/* Block all ports */
-	if (ctrl->r->family_id == RTL8380_FAMILY_ID) {
-		sw_w32(0x03000000, RTL838X_TBL_ACCESS_DATA_0(0));
-		sw_w32(0x00000000, RTL838X_TBL_ACCESS_DATA_0(1));
-		sw_w32(1 << 15 | 2 << 12, RTL838X_TBL_ACCESS_CTRL_0);
-	}
-
-	/* Flush L2 address cache */
-	if (ctrl->r->family_id == RTL8380_FAMILY_ID) {
-		/* Disable FAST_AGE_OUT otherwise flush will hang */
-		sw_w32_mask(BIT(23), 0, RTL838X_L2_CTRL_1);
-		for (int i = 0; i <= ctrl->r->cpu_port; i++) {
-			sw_w32(BIT(26) | BIT(23) | i << 5, ctrl->r->l2_tbl_flush_ctrl);
-			do { } while (sw_r32(ctrl->r->l2_tbl_flush_ctrl) & BIT(26));
-		}
-	} else if (ctrl->r->family_id == RTL8390_FAMILY_ID) {
-		for (int i = 0; i <= ctrl->r->cpu_port; i++) {
-			sw_w32(BIT(28) | BIT(25) | i << 5, ctrl->r->l2_tbl_flush_ctrl);
-			do { } while (sw_r32(ctrl->r->l2_tbl_flush_ctrl) & BIT(28));
-		}
-	}
-	/* TODO: L2 flush register is 64 bit on RTL931X and 930X */
-
-	/* CPU-Port: Link down */
-	if (ctrl->r->family_id == RTL8380_FAMILY_ID || ctrl->r->family_id == RTL8390_FAMILY_ID)
-		sw_w32(force_mac, ctrl->r->mac_force_mode_ctrl);
-	else if (ctrl->r->family_id == RTL9300_FAMILY_ID)
-		sw_w32_mask(0x3, 0, ctrl->r->mac_force_mode_ctrl);
-	else if (ctrl->r->family_id == RTL9310_FAMILY_ID)
-		sw_w32_mask(BIT(0) | BIT(9), 0, ctrl->r->mac_force_mode_ctrl);
+	/* family specific stop */
+	ctrl->r->hw_stop(ctrl);
 	mdelay(100);
 
 	rteth_disable_all_irqs(ctrl);
@@ -789,7 +805,7 @@ static int rteth_stop(struct net_device *ndev)
 	pr_info("in %s\n", __func__);
 
 	phylink_stop(ctrl->phylink);
-	rtl838x_hw_stop(ctrl);
+	rteth_hw_stop(ctrl);
 
 	for (int i = 0; i < RTETH_RX_RINGS; i++)
 		napi_disable(&ctrl->rx_qs[i].napi);
@@ -885,9 +901,9 @@ static void rteth_tx_timeout(struct net_device *ndev, unsigned int txqueue)
 
 	pr_warn("%s\n", __func__);
 	spin_lock_irqsave(&ctrl->lock, flags);
-	rtl838x_hw_stop(ctrl);
+	rteth_hw_stop(ctrl);
 	rteth_hw_ring_setup(ctrl);
-	rtl838x_hw_en_rxtx(ctrl);
+	ctrl->r->hw_en_rxtx(ctrl);
 	netif_trans_update(ndev);
 	netif_start_queue(ndev);
 	spin_unlock_irqrestore(&ctrl->lock, flags);
@@ -1078,74 +1094,6 @@ static void rteth_mac_config(struct phylink_config *config,
 	pr_info("In %s, mode %x\n", __func__, mode);
 }
 
-static void rteth_pcs_an_restart(struct phylink_pcs *pcs)
-{
-	struct rteth_ctrl *ctrl = container_of(pcs, struct rteth_ctrl, pcs);
-
-	/* This works only on RTL838x chips */
-	if (ctrl->r->family_id != RTL8380_FAMILY_ID)
-		return;
-
-	pr_debug("In %s\n", __func__);
-	/* Restart by disabling and re-enabling link */
-	sw_w32(0x6192D, ctrl->r->mac_force_mode_ctrl);
-	mdelay(20);
-	sw_w32(0x6192F, ctrl->r->mac_force_mode_ctrl);
-}
-
-static void rteth_pcs_get_state(struct phylink_pcs *pcs,
-				struct phylink_link_state *state)
-{
-	u32 speed;
-	struct rteth_ctrl *ctrl = container_of(pcs, struct rteth_ctrl, pcs);
-	int port = ctrl->r->cpu_port;
-
-	pr_info("In %s\n", __func__);
-
-	state->link = ctrl->r->get_mac_link_sts(port) ? 1 : 0;
-	state->duplex = ctrl->r->get_mac_link_dup_sts(port) ? 1 : 0;
-
-	pr_info("%s link status is %d\n", __func__, state->link);
-	speed = ctrl->r->get_mac_link_spd_sts(port);
-	switch (speed) {
-	case 0:
-		state->speed = SPEED_10;
-		break;
-	case 1:
-		state->speed = SPEED_100;
-		break;
-	case 2:
-		state->speed = SPEED_1000;
-		break;
-	case 5:
-		state->speed = SPEED_2500;
-		break;
-	case 6:
-		state->speed = SPEED_5000;
-		break;
-	case 4:
-		state->speed = SPEED_10000;
-		break;
-	default:
-		state->speed = SPEED_UNKNOWN;
-		break;
-	}
-
-	state->pause &= (MLO_PAUSE_RX | MLO_PAUSE_TX);
-	if (ctrl->r->get_mac_rx_pause_sts(port))
-		state->pause |= MLO_PAUSE_RX;
-	if (ctrl->r->get_mac_tx_pause_sts(port))
-		state->pause |= MLO_PAUSE_TX;
-}
-
-static int rteth_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
-			    phy_interface_t interface,
-			    const unsigned long *advertising,
-			    bool permit_pause_to_mac)
-{
-	return 0;
-}
-
 static void rteth_mac_link_down(struct phylink_config *config,
 				unsigned int mode,
 				phy_interface_t interface)
@@ -1318,15 +1266,6 @@ static int rteth_93xx_set_features(struct net_device *dev, netdev_features_t fea
 	return 0;
 }
 
-static struct phylink_pcs *rteth_mac_select_pcs(struct phylink_config *config,
-						phy_interface_t interface)
-{
-	struct net_device *dev = to_net_dev(config->dev);
-	struct rteth_ctrl *ctrl = netdev_priv(dev);
-
-	return &ctrl->pcs;
-}
-
 static int rteth_setup_tc(struct net_device *dev, enum tc_setup_type type, void *type_data)
 {
     struct dsa_switch *ds;
@@ -1358,7 +1297,6 @@ static const struct net_device_ops rteth_838x_netdev_ops = {
 };
 
 static const struct rteth_config rteth_838x_cfg = {
-	.family_id = RTL8380_FAMILY_ID,
 	.cpu_port = RTETH_838X_CPU_PORT,
 	.rx_rings = 8,
 	.tx_rx_enable = 0xc,
@@ -1376,11 +1314,6 @@ static const struct rteth_config rteth_838x_cfg = {
 	.dma_if_rx_ring_size = rtl838x_dma_if_rx_ring_size,
 	.dma_if_rx_ring_cntr = rtl838x_dma_if_rx_ring_cntr,
 	.rst_glb_ctrl = RTL838X_RST_GLB_CTRL_0,
-	.get_mac_link_sts = rtl838x_get_mac_link_sts,
-	.get_mac_link_dup_sts = rtl838x_get_mac_link_dup_sts,
-	.get_mac_link_spd_sts = rtl838x_get_mac_link_spd_sts,
-	.get_mac_rx_pause_sts = rtl838x_get_mac_rx_pause_sts,
-	.get_mac_tx_pause_sts = rtl838x_get_mac_tx_pause_sts,
 	.mac_reg = { RTETH_838X_MAC_ADDR_CTRL,
 		     RTETH_838X_MAC_ADDR_CTRL_ALE,
 		     RTETH_838X_MAC_ADDR_CTRL_MAC },
@@ -1388,6 +1321,9 @@ static const struct rteth_config rteth_838x_cfg = {
 	.update_counter = rteth_83xx_update_counter,
 	.create_tx_header = rteth_838x_create_tx_header,
 	.decode_tag = rteth_838x_decode_tag,
+	.hw_en_rxtx = rteth_838x_hw_en_rxtx,
+	.hw_init = &rteth_838x_hw_init,
+	.hw_stop = &rteth_838x_hw_stop,
 	.hw_reset = &rteth_838x_hw_reset,
 	.init_mac = &rteth_838x_init_mac,
 	.netdev_ops = &rteth_838x_netdev_ops,
@@ -1407,7 +1343,6 @@ static const struct net_device_ops rteth_839x_netdev_ops = {
 };
 
 static const struct rteth_config rteth_839x_cfg = {
-	.family_id = RTL8390_FAMILY_ID,
 	.cpu_port = RTETH_839X_CPU_PORT,
 	.rx_rings = 8,
 	.tx_rx_enable = 0xc,
@@ -1425,18 +1360,17 @@ static const struct rteth_config rteth_839x_cfg = {
 	.dma_if_rx_ring_size = rtl839x_dma_if_rx_ring_size,
 	.dma_if_rx_ring_cntr = rtl839x_dma_if_rx_ring_cntr,
 	.rst_glb_ctrl = RTL839X_RST_GLB_CTRL,
-	.get_mac_link_sts = rtl839x_get_mac_link_sts,
-	.get_mac_link_dup_sts = rtl839x_get_mac_link_dup_sts,
-	.get_mac_link_spd_sts = rtl839x_get_mac_link_spd_sts,
-	.get_mac_rx_pause_sts = rtl839x_get_mac_rx_pause_sts,
-	.get_mac_tx_pause_sts = rtl839x_get_mac_tx_pause_sts,
 	.mac_reg = { RTETH_839X_MAC_ADDR_CTRL },
 	.l2_tbl_flush_ctrl = RTL839X_L2_TBL_FLUSH_CTRL,
 	.update_counter = rteth_83xx_update_counter,
 	.create_tx_header = rteth_839x_create_tx_header,
 	.decode_tag = rteth_839x_decode_tag,
+	.hw_en_rxtx = rteth_839x_hw_en_rxtx,
+	.hw_init = &rteth_839x_hw_init,
+	.hw_stop = &rteth_839x_hw_stop,
 	.hw_reset = &rteth_839x_hw_reset,
 	.init_mac = &rteth_839x_init_mac,
+	.setup_notify_ring_buffer = &rteth_839x_setup_notify_ring_buffer,
 	.netdev_ops = &rteth_839x_netdev_ops,
 };
 
@@ -1454,7 +1388,6 @@ static const struct net_device_ops rteth_930x_netdev_ops = {
 };
 
 static const struct rteth_config rteth_930x_cfg = {
-	.family_id = RTL9300_FAMILY_ID,
 	.cpu_port = RTETH_930X_CPU_PORT,
 	.rx_rings = 32,
 	.tx_rx_enable = 0x30,
@@ -1473,16 +1406,14 @@ static const struct rteth_config rteth_930x_cfg = {
 	.dma_if_rx_ring_size = rtl930x_dma_if_rx_ring_size,
 	.dma_if_rx_ring_cntr = rtl930x_dma_if_rx_ring_cntr,
 	.rst_glb_ctrl = RTL930X_RST_GLB_CTRL_0,
-	.get_mac_link_sts = rtl930x_get_mac_link_sts,
-	.get_mac_link_dup_sts = rtl930x_get_mac_link_dup_sts,
-	.get_mac_link_spd_sts = rtl930x_get_mac_link_spd_sts,
-	.get_mac_rx_pause_sts = rtl930x_get_mac_rx_pause_sts,
-	.get_mac_tx_pause_sts = rtl930x_get_mac_tx_pause_sts,
 	.mac_reg = { RTETH_930X_MAC_L2_ADDR_CTRL },
 	.l2_tbl_flush_ctrl = RTL930X_L2_TBL_FLUSH_CTRL,
 	.update_counter = rteth_93xx_update_counter,
 	.create_tx_header = rteth_93xx_create_tx_header,
 	.decode_tag = rteth_930x_decode_tag,
+	.hw_en_rxtx = rteth_930x_hw_en_rxtx,
+	.hw_init = &rteth_930x_hw_init,
+	.hw_stop = &rteth_930x_hw_stop,
 	.hw_reset = &rteth_93xx_hw_reset,
 	.init_mac = &rteth_930x_init_mac,
 	.netdev_ops = &rteth_930x_netdev_ops,
@@ -1502,7 +1433,6 @@ static const struct net_device_ops rteth_931x_netdev_ops = {
 };
 
 static const struct rteth_config rteth_931x_cfg = {
-	.family_id = RTL9310_FAMILY_ID,
 	.cpu_port = RTETH_931X_CPU_PORT,
 	.rx_rings = 32,
 	.tx_rx_enable = 0x30,
@@ -1521,29 +1451,20 @@ static const struct rteth_config rteth_931x_cfg = {
 	.dma_if_rx_ring_size = rtl931x_dma_if_rx_ring_size,
 	.dma_if_rx_ring_cntr = rtl931x_dma_if_rx_ring_cntr,
 	.rst_glb_ctrl = RTL931X_RST_GLB_CTRL,
-	.get_mac_link_sts = rtldsa_931x_get_mac_link_sts,
-	.get_mac_link_dup_sts = rtl931x_get_mac_link_dup_sts,
-	.get_mac_link_spd_sts = rtl931x_get_mac_link_spd_sts,
-	.get_mac_rx_pause_sts = rtl931x_get_mac_rx_pause_sts,
-	.get_mac_tx_pause_sts = rtl931x_get_mac_tx_pause_sts,
 	.mac_reg = { RTETH_930X_MAC_L2_ADDR_CTRL },
 	.l2_tbl_flush_ctrl = RTL931X_L2_TBL_FLUSH_CTRL,
 	.update_counter = rteth_93xx_update_counter,
 	.create_tx_header = rteth_93xx_create_tx_header,
 	.decode_tag = rteth_931x_decode_tag,
+	.hw_en_rxtx = rteth_931x_hw_en_rxtx,
+	.hw_init = &rteth_931x_hw_init,
+	.hw_stop = &rteth_931x_hw_stop,
 	.hw_reset = &rteth_93xx_hw_reset,
 	.init_mac = &rteth_931x_init_mac,
 	.netdev_ops = &rteth_931x_netdev_ops,
 };
 
-static const struct phylink_pcs_ops rteth_pcs_ops = {
-	.pcs_get_state = rteth_pcs_get_state,
-	.pcs_an_restart = rteth_pcs_an_restart,
-	.pcs_config = rteth_pcs_config,
-};
-
 static const struct phylink_mac_ops rteth_mac_ops = {
-	.mac_select_pcs = rteth_mac_select_pcs,
 	.mac_config = rteth_mac_config,
 	.mac_link_down = rteth_mac_link_down,
 	.mac_link_up = rteth_mac_link_up,
@@ -1554,7 +1475,7 @@ static const struct ethtool_ops rteth_ethtool_ops = {
 	.set_link_ksettings = rteth_set_link_ksettings,
 };
 
-static int rtl838x_eth_probe(struct platform_device *pdev)
+static int rteth_probe(struct platform_device *pdev)
 {
 	struct net_device *dev;
 	struct device_node *dn = pdev->dev.of_node;
@@ -1567,11 +1488,6 @@ static int rtl838x_eth_probe(struct platform_device *pdev)
 
 	pr_info("Probing RTL838X eth device pdev: %x, dev: %x\n",
 		(u32)pdev, (u32)(&pdev->dev));
-
-	if (!dn) {
-		dev_err(&pdev->dev, "No DT found\n");
-		return -EINVAL;
-	}
 
 	cfg = device_get_match_data(&pdev->dev);
 
@@ -1678,7 +1594,6 @@ static int rtl838x_eth_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	ctrl->pcs.ops = &rteth_pcs_ops;
 	ctrl->phylink_config.dev = &dev->dev;
 	ctrl->phylink_config.type = PHYLINK_NETDEV;
 	ctrl->phylink_config.mac_capabilities =
@@ -1696,23 +1611,21 @@ static int rtl838x_eth_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void rtl838x_eth_remove(struct platform_device *pdev)
+static void rteth_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = platform_get_drvdata(pdev);
 	struct rteth_ctrl *ctrl = netdev_priv(dev);
 
-	if (dev) {
-		pr_info("Removing platform driver for rtl838x-eth\n");
-		rtl838x_hw_stop(ctrl);
+	pr_info("Removing platform driver for rtl838x-eth\n");
+	rteth_hw_stop(ctrl);
 
-		netif_tx_stop_all_queues(dev);
+	netif_tx_stop_all_queues(dev);
 
-		for (int i = 0; i < RTETH_RX_RINGS; i++)
-			netif_napi_del(&ctrl->rx_qs[i].napi);
-	}
+	for (int i = 0; i < RTETH_RX_RINGS; i++)
+		netif_napi_del(&ctrl->rx_qs[i].napi);
 }
 
-static const struct of_device_id rtl838x_eth_of_ids[] = {
+static const struct of_device_id rteth_of_ids[] = {
 	{
 		.compatible = "realtek,rtl8380-eth",
 		.data = &rteth_838x_cfg,
@@ -1731,15 +1644,15 @@ static const struct of_device_id rtl838x_eth_of_ids[] = {
 	},
 	{ /* sentinel */ }
 };
-MODULE_DEVICE_TABLE(of, rtl838x_eth_of_ids);
+MODULE_DEVICE_TABLE(of, rteth_of_ids);
 
 static struct platform_driver rtl838x_eth_driver = {
-	.probe  = rtl838x_eth_probe,
-	.remove = rtl838x_eth_remove,
+	.probe  = rteth_probe,
+	.remove = rteth_remove,
 	.driver = {
-		.name = "rtl838x-eth",
+		.name = KBUILD_MODNAME,
 		.pm = NULL,
-		.of_match_table = rtl838x_eth_of_ids,
+		.of_match_table = rteth_of_ids,
 	},
 };
 
